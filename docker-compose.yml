@@ -1,0 +1,33 @@
+version: '3.9'
+
+services:
+  mongo:
+    image: mongo:7
+    ports:
+      - '27017:27017'
+    volumes:
+      - mongo_data:/data/db
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+
+  backend:
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+    ports:
+      - '3000:3000'
+      - '9000:9000'
+    env_file:
+      - apps/backend/.env
+    environment:
+      MONGODB_URI: mongodb://mongo:27017/ev_charging
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - mongo
+      - redis
+
+volumes:
+  mongo_data:

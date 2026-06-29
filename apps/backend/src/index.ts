@@ -7,6 +7,7 @@ import { getRedis } from './config/redis';
 import { createApp } from './api/app';
 import { createOcppServer } from './ocpp/server';
 import { startWatchdog } from './ocpp/watchdog';
+import { startReconciliationJob } from './jobs/reconciliation';
 
 async function main() {
   await connectDatabase();
@@ -26,6 +27,9 @@ async function main() {
 
   startWatchdog();
   logger.info('Heartbeat watchdog started');
+
+  startReconciliationJob();
+  logger.info('Reconciliation job started (1h interval)');
 
   process.on('SIGTERM', async () => {
     logger.info('SIGTERM received — shutting down');
