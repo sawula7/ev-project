@@ -34,6 +34,6 @@ Two-sided EV charging marketplace. Drivers find chargers and pay via wallet. Cha
 
 ## Open Questions (flag before assuming)
 - Payment gateway choice (PayHere / WebXPay / Stripe / other)
-- AWS region (likely ap-south-1)
+- AWS region: ap-southeast-1 (Singapore) ✓ confirmed
 - wss:// support on charger firmware
 - AuthorizationKey: per-unit or fleet-shared?

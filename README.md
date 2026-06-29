@@ -49,6 +49,6 @@ yarn test:backend
 ## Open questions (must resolve before Phase 1 go-live)
 
 - [ ] Payment gateway choice (PayHere / WebXPay / Stripe)
-- [ ] AWS region confirmation (likely `ap-south-1`)
+- [x] AWS region: `ap-southeast-1` (Singapore)
 - [ ] `wss://` TLS confirmed on charger firmware?
 - [ ] `AuthorizationKey`: per-unit or fleet-shared?
