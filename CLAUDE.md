@@ -32,8 +32,18 @@ Two-sided EV charging marketplace. Drivers find chargers and pay via wallet. Cha
 3. Phase 3: Marketplace (Owner accounts, claim flow, Owner app)
 4. Phase 4: Hardening, scale, push notifications, reconciliation
 
+## Payment Model
+POS purchase model:
+- Driver saves card in app → gateway tokenizes it (we never store raw card data)
+- Top-up: driver picks amount → backend initiates a **purchase** transaction (not
+  authorize+capture, not recurring/subscription) using the stored card token
+- Gateway fires a webhook on success → backend writes a TOPUP LedgerEntry and
+  credits the driver wallet (idempotent — safe to retry)
+- Sessions debit from the wallet balance (Phase 2+)
+- Transaction type must be "purchase" / "sale" in the gateway API, not "auth"
+
 ## Open Questions (flag before assuming)
-- Payment gateway choice (PayHere / WebXPay / Stripe / other)
+- Payment gateway choice (PayHere / WebXPay — both support POS purchase + tokenization)
 - AWS region: ap-southeast-1 (Singapore) ✓ confirmed
 - wss:// support on charger firmware
 - AuthorizationKey: per-unit or fleet-shared?
