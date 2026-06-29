@@ -1,0 +1,14 @@
+{
+  "name": "ev-charging-marketplace",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/backend"
+  ],
+  "scripts": {
+    "dev:backend": "yarn workspace @ev/backend dev",
+    "build:backend": "yarn workspace @ev/backend build",
+    "test:backend": "yarn workspace @ev/backend test",
+    "build:shared": "yarn workspace @ev/shared build"
+  }
+}
