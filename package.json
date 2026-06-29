@@ -12,6 +12,9 @@
     "test:backend": "yarn workspace @ev/backend test",
     "build:shared": "yarn workspace @ev/shared build",
     "dev:admin": "yarn workspace @ev/admin-web dev",
-    "build:admin": "yarn workspace @ev/admin-web build"
+    "build:admin": "yarn workspace @ev/admin-web build",
+    "seed": "npx ts-node --project apps/backend/tsconfig.json scripts/seed.ts",
+    "simulate": "node scripts/simulate-charger.js",
+    "test:local": "bash scripts/local-test.sh"
   }
 }
