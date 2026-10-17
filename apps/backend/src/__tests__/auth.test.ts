@@ -1,5 +1,5 @@
 // Set required env vars before importing config
-process.env.MONGODB_URI = 'mongodb://localhost/test';
+process.env.DATABASE_URL = 'postgresql://localhost/test';
 process.env.JWT_SECRET = 'test-secret-at-least-32-chars-long!!';
 
 import { hashPassword, verifyPassword, signToken, verifyToken } from '../services/auth';

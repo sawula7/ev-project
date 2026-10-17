@@ -28,7 +28,7 @@ cleanup() {
   info "Shutting down background processes…"
   [ -n "$BACKEND_PID"   ] && kill "$BACKEND_PID"   2>/dev/null || true
   [ -n "$SIMULATOR_PID" ] && kill "$SIMULATOR_PID" 2>/dev/null || true
-  docker compose stop mongo redis 2>/dev/null || true
+  docker compose stop postgres redis 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -47,16 +47,16 @@ info "Installing dependencies…"
 yarn install --silent
 ok "Dependencies installed"
 
-# ── 2. Start MongoDB + Redis ─────────────────────────────────────────────────
+# ── 2. Start PostgreSQL + Redis ──────────────────────────────────────────────
 
-info "Starting MongoDB and Redis via Docker Compose…"
-docker compose up -d mongo redis
-echo "Waiting for MongoDB to be ready…"
+info "Starting PostgreSQL and Redis via Docker Compose…"
+docker compose up -d postgres redis
+echo "Waiting for PostgreSQL to be ready…"
 for i in $(seq 1 30); do
-  docker compose exec -T mongo mongosh --eval "db.runCommand({ping:1})" --quiet 2>/dev/null && break
+  docker compose exec -T postgres pg_isready -U postgres 2>/dev/null && break
   sleep 1
 done
-ok "MongoDB + Redis ready"
+ok "PostgreSQL + Redis ready"
 
 # ── 3. Copy local env ────────────────────────────────────────────────────────
 
@@ -65,13 +65,20 @@ if [ ! -f apps/backend/.env ]; then
   info "Created apps/backend/.env from .env.local"
 fi
 
-# ── 4. Run unit tests ────────────────────────────────────────────────────────
+# ── 4. Push Drizzle schema to Postgres ──────────────────────────────────────
+
+info "Pushing Drizzle schema to PostgreSQL…"
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/ev_charging_local" \
+  npx drizzle-kit push --config packages/db/drizzle.config.ts
+ok "Schema pushed"
+
+# ── 5. Run unit tests ────────────────────────────────────────────────────────
 
 info "Running unit tests…"
 yarn test:backend --silent 2>&1 | tail -5
 ok "Unit tests passed"
 
-# ── 5. Start backend ─────────────────────────────────────────────────────────
+# ── 6. Start backend ─────────────────────────────────────────────────────────
 
 info "Starting backend (REST :3000, OCPP :9000)…"
 yarn dev:backend > /tmp/ev-backend.log 2>&1 &
@@ -85,7 +92,7 @@ for i in $(seq 1 30); do
 done
 ok "Backend running (pid $BACKEND_PID)"
 
-# ── 6. Seed test data ────────────────────────────────────────────────────────
+# ── 7. Seed test data ────────────────────────────────────────────────────────
 
 info "Seeding test data…"
 SEED_OUTPUT=$(npx ts-node --project apps/backend/tsconfig.json scripts/seed.ts 2>/dev/null)
@@ -98,7 +105,7 @@ ADMIN_TOKEN=$(echo  "$SEED_OUTPUT" | grep "Token:" | tail -1 | awk '{print $2}')
 [ -z "$ADMIN_TOKEN"  ] && fail "Could not extract admin token from seed output"
 ok "Seed complete"
 
-# ── 7. Start OCPP charger simulator ─────────────────────────────────────────
+# ── 8. Start OCPP charger simulator ─────────────────────────────────────────
 
 info "Installing ocpp-rpc for simulator (if needed)…"
 node -e "require('ocpp-rpc')" 2>/dev/null || npm install --no-save ocpp-rpc >/dev/null 2>&1
@@ -117,7 +124,7 @@ done
 ok "Charger simulator connected"
 sleep 2  # let BootNotification complete
 
-# ── 8. API smoke tests ────────────────────────────────────────────────────────
+# ── 9. API smoke tests ────────────────────────────────────────────────────────
 
 info "Running API smoke tests…"
 
@@ -192,7 +199,7 @@ RECON=$(curl -sf http://localhost:3000/admin/reconciliation \
   -H "Authorization: Bearer $ADMIN_TOKEN")
 ok "Admin reconciliation: $RECON"
 
-# ── 9. Done ──────────────────────────────────────────────────────────────────
+# ── 10. Done ─────────────────────────────────────────────────────────────────
 
 echo ""
 echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"

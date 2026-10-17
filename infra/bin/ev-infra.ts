@@ -3,6 +3,7 @@ import 'source-map-support/register';
 import * as cdk from 'aws-cdk-lib';
 import { NetworkStack } from '../lib/network-stack';
 import { CacheStack } from '../lib/cache-stack';
+import { DatabaseStack } from '../lib/database-stack';
 import { ApiStack } from '../lib/api-stack';
 import { FrontendStack } from '../lib/frontend-stack';
 
@@ -24,12 +25,21 @@ const cache = new CacheStack(app, `ev-cache-${envName}`, {
   ecsSecurityGroup: network.ecsSecurityGroup,
 });
 
+const database = new DatabaseStack(app, `ev-db-${envName}`, {
+  env,
+  envName,
+  vpc: network.vpc,
+  ecsSecurityGroup: network.ecsSecurityGroup,
+});
+
 new ApiStack(app, `ev-api-${envName}`, {
   env,
   envName,
   vpc: network.vpc,
   ecsSecurityGroup: network.ecsSecurityGroup,
   albSecurityGroup: network.albSecurityGroup,
+  dbSecret: database.dbSecret,
+  dbEndpoint: database.dbEndpoint,
 });
 
 new FrontendStack(app, `ev-frontend-${envName}`, { env, envName });

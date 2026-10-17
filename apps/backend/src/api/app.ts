@@ -1,4 +1,5 @@
 import express from 'express';
+import { type Db } from '@ev/db';
 import { authRouter } from './routes/auth';
 import { chargersRouter } from './routes/chargers';
 import { sessionsRouter } from './routes/sessions';
@@ -8,7 +9,7 @@ import { adminRouter } from './routes/admin';
 import { errorHandler } from './middleware/errorHandler';
 import { authLimiter, apiLimiter } from './middleware/rateLimit';
 
-export function createApp() {
+export function createApp(db: Db) {
   const app = express();
 
   app.use(express.json({ limit: '100kb' }));
@@ -16,12 +17,12 @@ export function createApp() {
 
   app.get('/health', (_req, res) => res.json({ ok: true }));
 
-  app.use('/auth', authLimiter, authRouter);
-  app.use('/chargers', apiLimiter, chargersRouter);
-  app.use('/sessions', apiLimiter, sessionsRouter);
-  app.use('/wallet', apiLimiter, walletRouter);
-  app.use('/owner', apiLimiter, ownerRouter);
-  app.use('/admin', apiLimiter, adminRouter);
+  app.use('/auth', authLimiter, authRouter(db));
+  app.use('/chargers', apiLimiter, chargersRouter(db));
+  app.use('/sessions', apiLimiter, sessionsRouter(db));
+  app.use('/wallet', apiLimiter, walletRouter(db));
+  app.use('/owner', apiLimiter, ownerRouter(db));
+  app.use('/admin', apiLimiter, adminRouter(db));
 
   app.use(errorHandler);
 

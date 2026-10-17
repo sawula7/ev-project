@@ -7,12 +7,26 @@ function required(key: string): string {
   return val;
 }
 
+// RDS's auto-generated Secrets Manager secret only contains username/password
+// (not a full connection string), so in AWS we assemble DATABASE_URL from
+// discrete PG* parts. Local dev (docker-compose) sets DATABASE_URL directly.
+function resolveDatabaseUrl(): string {
+  if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
+
+  const host = required('PGHOST');
+  const port = process.env.PGPORT ?? '5432';
+  const user = required('PGUSER');
+  const password = required('PGPASSWORD');
+  const database = required('PGDATABASE');
+  return `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${database}`;
+}
+
 export const config = {
   port: parseInt(process.env.PORT ?? '3000', 10),
   ocppPort: parseInt(process.env.OCPP_PORT ?? '9000', 10),
   nodeEnv: process.env.NODE_ENV ?? 'development',
 
-  databaseUrl: required('DATABASE_URL'),
+  databaseUrl: resolveDatabaseUrl(),
   redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6379',
 
   jwtSecret: required('JWT_SECRET'),

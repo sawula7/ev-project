@@ -13,6 +13,8 @@ interface Props extends cdk.StackProps {
   vpc: ec2.Vpc;
   ecsSecurityGroup: ec2.SecurityGroup;
   albSecurityGroup: ec2.SecurityGroup;
+  dbSecret: secretsmanager.ISecret;
+  dbEndpoint: string;
 }
 
 export class ApiStack extends cdk.Stack {
@@ -27,9 +29,6 @@ export class ApiStack extends cdk.Stack {
     });
 
     // ── Secrets ────────────────────────────────────────────────────────────────
-    const mongoSecret = secretsmanager.Secret.fromSecretNameV2(
-      this, 'MongoSecret', `ev/${props.envName}/mongodb-uri`
-    );
     const jwtSecret = secretsmanager.Secret.fromSecretNameV2(
       this, 'JwtSecret', `ev/${props.envName}/jwt-secret`
     );
@@ -55,13 +54,17 @@ export class ApiStack extends cdk.Stack {
         iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AmazonECSTaskExecutionRolePolicy'),
       ],
     });
-    [mongoSecret, jwtSecret, redisSecret, ocppAuthKey].forEach(s =>
+    [props.dbSecret, jwtSecret, redisSecret, ocppAuthKey].forEach(s =>
       s.grantRead(executionRole)
     );
 
     // ── Shared config ──────────────────────────────────────────────────────────
+    // RDS's auto-generated secret holds only username/password — host/port/
+    // dbname are assembled by the app from plain env vars (not secret: the
+    // endpoint is just a DNS name).
     const sharedSecrets: Record<string, ecs.Secret> = {
-      MONGODB_URI:           ecs.Secret.fromSecretsManager(mongoSecret),
+      PGUSER:                ecs.Secret.fromSecretsManager(props.dbSecret, 'username'),
+      PGPASSWORD:            ecs.Secret.fromSecretsManager(props.dbSecret, 'password'),
       JWT_SECRET:            ecs.Secret.fromSecretsManager(jwtSecret),
       REDIS_URL:             ecs.Secret.fromSecretsManager(redisSecret),
       OCPP_DEFAULT_AUTH_KEY: ecs.Secret.fromSecretsManager(ocppAuthKey),
@@ -71,6 +74,9 @@ export class ApiStack extends cdk.Stack {
       NODE_ENV:            'production',
       COMMISSION_RATE_BPS: '1000',
       LOG_LEVEL:           'info',
+      PGHOST:              props.dbEndpoint,
+      PGPORT:              '5432',
+      PGDATABASE:          'ev_charging',
     };
 
     const image = ecs.ContainerImage.fromEcrRepository(repo, 'latest');
@@ -163,21 +169,6 @@ export class ApiStack extends cdk.Stack {
       vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
     });
 
-    // HTTP → HTTPS redirect
-    alb.addListener('Http', {
-      port: 80,
-      defaultAction: elbv2.ListenerAction.redirect({
-        protocol: 'HTTPS', port: '443', permanent: true,
-      }),
-    });
-
-    const certArn = this.node.tryGetContext('certificateArn');
-    const httpsListener = alb.addListener('Https', {
-      port: 443,
-      certificates: certArn ? [elbv2.ListenerCertificate.fromArn(certArn)] : [],
-      ...(certArn ? {} : { protocol: elbv2.ApplicationProtocol.HTTP, port: 80 }),
-    });
-
     // /ocpp/* → OCPP (WebSocket — no stickiness, state in Redis)
     const ocppTg = new elbv2.ApplicationTargetGroup(this, 'OcppTg', {
       targetGroupName: `ev-ocpp-tg-${props.envName}`,
@@ -198,12 +189,36 @@ export class ApiStack extends cdk.Stack {
       healthCheck: { path: '/health', port: '3000' },
     });
 
-    httpsListener.addAction('OcppRoute', {
+    const certArn = this.node.tryGetContext('certificateArn');
+    let mainListener: elbv2.ApplicationListener;
+
+    if (certArn) {
+      // HTTP → HTTPS redirect, HTTPS does the real routing
+      alb.addListener('Http', {
+        port: 80,
+        defaultAction: elbv2.ListenerAction.redirect({
+          protocol: 'HTTPS', port: '443', permanent: true,
+        }),
+      });
+      mainListener = alb.addListener('Https', {
+        port: 443,
+        certificates: [elbv2.ListenerCertificate.fromArn(certArn)],
+        defaultAction: elbv2.ListenerAction.forward([apiTg]),
+      });
+    } else {
+      // No certificate yet (early dev) — plain HTTP on 80, no redirect.
+      // Pass --context certificateArn=... once an ACM cert exists.
+      mainListener = alb.addListener('Http', {
+        port: 80,
+        defaultAction: elbv2.ListenerAction.forward([apiTg]),
+      });
+    }
+
+    mainListener.addAction('OcppRoute', {
       priority: 10,
       conditions: [elbv2.ListenerCondition.pathPatterns(['/ocpp/*'])],
       action: elbv2.ListenerAction.forward([ocppTg]),
     });
-    httpsListener.addDefaultAction(elbv2.ListenerAction.forward([apiTg]));
 
     // ── Outputs ────────────────────────────────────────────────────────────────
     new cdk.CfnOutput(this, 'AlbDnsName',       { value: alb.loadBalancerDnsName });

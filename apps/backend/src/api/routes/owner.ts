@@ -1,147 +1,234 @@
 import { Router, Response, NextFunction } from 'express';
 import { z } from 'zod';
+import { eq, and, desc } from 'drizzle-orm';
+import { type Db, chargers, owners, wallets, payouts, chargingSessions } from '@ev/db';
 import { authenticate, AuthRequest, requireRole } from '../middleware/authenticate';
-import { Charger } from '../../models/Charger';
-import { Owner } from '../../models/Owner';
-import { Wallet } from '../../models/Wallet';
-import { Payout } from '../../models/Payout';
-import { ChargingSession } from '../../models/ChargingSession';
 import { ChargerStatus, PayoutStatus } from '@ev/shared';
-import { v4 as uuidv4 } from 'uuid';
+import { toPublicCharger } from '../serializers';
 
-export const ownerRouter = Router();
-ownerRouter.use(authenticate, requireRole('owner'));
+export function ownerRouter(db: Db) {
+  const router = Router();
+  router.use(authenticate, requireRole('owner'));
 
-// GET /owner/me
-ownerRouter.get('/me', async (req: AuthRequest, res: Response, next: NextFunction) => {
-  try {
-    const owner = await Owner.findById(req.user!.sub).select('-passwordHash');
-    if (!owner) { res.status(404).json({ success: false, error: 'Not found' }); return; }
-    const wallet = await Wallet.findById(owner.walletId);
-    res.json({ success: true, data: { owner, wallet: { balance: wallet?.balance ?? 0, currency: wallet?.currency ?? 'LKR' } } });
-  } catch (err) { next(err); }
-});
+  // GET /owner/me
+  router.get('/me', async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const [owner] = await db
+        .select({
+          id: owners.id,
+          email: owners.email,
+          name: owners.name,
+          businessName: owners.businessName,
+          phone: owners.phone,
+          walletId: owners.walletId,
+          kycVerified: owners.kycVerified,
+          createdAt: owners.createdAt,
+          updatedAt: owners.updatedAt,
+        })
+        .from(owners)
+        .where(eq(owners.id, req.user!.sub));
+      if (!owner) {
+        res.status(404).json({ success: false, error: 'Not found' });
+        return;
+      }
 
-// ── Charger claim flow ────────────────────────────────────────────────────────
+      const [wallet] = await db
+        .select()
+        .from(wallets)
+        .where(and(eq(wallets.ownerType, 'owner'), eq(wallets.ownerId, req.user!.sub)));
 
-const claimSchema = z.object({
-  serialNumber: z.string().min(1),
-  claimCode: z.string().length(8),
-});
-
-// POST /owner/chargers/claim
-// Owner enters the serial number + claim code printed on the unit.
-ownerRouter.post('/chargers/claim', async (req: AuthRequest, res: Response, next: NextFunction) => {
-  try {
-    const { serialNumber, claimCode } = claimSchema.parse(req.body);
-
-    const charger = await Charger.findOne({ serialNumber });
-    if (!charger) {
-      res.status(404).json({ success: false, error: 'Charger not found' });
-      return;
+      res.json({
+        success: true,
+        data: { owner, wallet: { balance: wallet?.balance ?? 0, currency: wallet?.currency ?? 'LKR' } },
+      });
+    } catch (err) {
+      next(err);
     }
-    if (charger.ownerId) {
-      res.status(409).json({ success: false, error: 'Charger already claimed' });
-      return;
+  });
+
+  // ── Charger claim flow ────────────────────────────────────────────────────────
+
+  const claimSchema = z.object({
+    serialNumber: z.string().min(1),
+    claimCode: z.string().length(8),
+  });
+
+  // POST /owner/chargers/claim
+  // Owner enters the serial number + claim code printed on the unit.
+  router.post('/chargers/claim', async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const { serialNumber, claimCode } = claimSchema.parse(req.body);
+
+      const [charger] = await db.select().from(chargers).where(eq(chargers.serialNumber, serialNumber));
+      if (!charger) {
+        res.status(404).json({ success: false, error: 'Charger not found' });
+        return;
+      }
+      if (charger.ownerId) {
+        res.status(409).json({ success: false, error: 'Charger already claimed' });
+        return;
+      }
+      if (charger.claimCode !== claimCode.toUpperCase()) {
+        res.status(400).json({ success: false, error: 'Invalid claim code' });
+        return;
+      }
+
+      await db
+        .update(chargers)
+        .set({ ownerId: req.user!.sub, status: ChargerStatus.IDLE, updatedAt: new Date() })
+        .where(eq(chargers.id, charger.id));
+
+      res.json({ success: true, data: { chargerId: charger.id, serialNumber: charger.serialNumber } });
+    } catch (err) {
+      next(err);
     }
-    if (charger.claimCode !== claimCode.toUpperCase()) {
-      res.status(400).json({ success: false, error: 'Invalid claim code' });
-      return;
+  });
+
+  // GET /owner/chargers — list chargers owned by this owner
+  router.get('/chargers', async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const rows = await db.select().from(chargers).where(eq(chargers.ownerId, req.user!.sub));
+      res.json({ success: true, data: rows.map(toPublicCharger) });
+    } catch (err) {
+      next(err);
     }
+  });
 
-    charger.ownerId = req.user!.sub as unknown as typeof charger.ownerId;
-    charger.status = ChargerStatus.IDLE;
-    await charger.save();
+  const updateChargerSchema = z.object({
+    pricePerKwh: z.number().int().positive().optional(),
+    location: z
+      .object({
+        lat: z.number(),
+        lng: z.number(),
+        address: z.string(),
+      })
+      .optional(),
+    connectorType: z.string().optional(),
+  });
 
-    res.json({ success: true, data: { chargerId: charger._id, serialNumber: charger.serialNumber } });
-  } catch (err) { next(err); }
-});
+  // PATCH /owner/chargers/:id
+  router.patch('/chargers/:id', async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const body = updateChargerSchema.parse(req.body);
+      const [charger] = await db
+        .select()
+        .from(chargers)
+        .where(and(eq(chargers.id, req.params.id), eq(chargers.ownerId, req.user!.sub)));
+      if (!charger) {
+        res.status(404).json({ success: false, error: 'Charger not found' });
+        return;
+      }
 
-// GET /owner/chargers — list chargers owned by this owner
-ownerRouter.get('/chargers', async (req: AuthRequest, res: Response, next: NextFunction) => {
-  try {
-    const chargers = await Charger.find({ ownerId: req.user!.sub }).select('-authorizationKey -claimCode');
-    res.json({ success: true, data: chargers });
-  } catch (err) { next(err); }
-});
+      const [updated] = await db
+        .update(chargers)
+        .set({
+          ...(body.pricePerKwh !== undefined ? { pricePerKwh: body.pricePerKwh } : {}),
+          ...(body.location
+            ? { lat: body.location.lat, lng: body.location.lng, address: body.location.address }
+            : {}),
+          ...(body.connectorType ? { connectorType: body.connectorType } : {}),
+          updatedAt: new Date(),
+        })
+        .where(eq(chargers.id, charger.id))
+        .returning();
 
-const updateChargerSchema = z.object({
-  pricePerKwh: z.number().int().positive().optional(),
-  location: z.object({
-    lat: z.number(),
-    lng: z.number(),
-    address: z.string(),
-  }).optional(),
-  connectorType: z.string().optional(),
-});
-
-// PATCH /owner/chargers/:id
-ownerRouter.patch('/chargers/:id', async (req: AuthRequest, res: Response, next: NextFunction) => {
-  try {
-    const body = updateChargerSchema.parse(req.body);
-    const charger = await Charger.findOne({ _id: req.params.id, ownerId: req.user!.sub });
-    if (!charger) { res.status(404).json({ success: false, error: 'Charger not found' }); return; }
-
-    if (body.pricePerKwh !== undefined) charger.pricePerKwh = body.pricePerKwh;
-    if (body.location) charger.location = body.location;
-    if (body.connectorType) charger.connectorType = body.connectorType;
-    await charger.save();
-
-    res.json({ success: true, data: charger });
-  } catch (err) { next(err); }
-});
-
-// GET /owner/sessions — session history for all owned chargers
-ownerRouter.get('/sessions', async (req: AuthRequest, res: Response, next: NextFunction) => {
-  try {
-    const sessions = await ChargingSession.find({ ownerId: req.user!.sub })
-      .sort({ createdAt: -1 })
-      .limit(100)
-      .populate('chargerId', 'serialNumber location');
-    res.json({ success: true, data: sessions });
-  } catch (err) { next(err); }
-});
-
-// ── Payouts ───────────────────────────────────────────────────────────────────
-
-const payoutSchema = z.object({
-  amount: z.number().int().positive(),
-});
-
-// POST /owner/payouts/request
-ownerRouter.post('/payouts/request', async (req: AuthRequest, res: Response, next: NextFunction) => {
-  try {
-    const { amount } = payoutSchema.parse(req.body);
-    const owner = await Owner.findById(req.user!.sub);
-    if (!owner) { res.status(404).json({ success: false, error: 'Owner not found' }); return; }
-
-    if (!owner.kycVerified) {
-      res.status(403).json({ success: false, error: 'KYC not verified — contact support' });
-      return;
+      res.json({ success: true, data: toPublicCharger(updated) });
+    } catch (err) {
+      next(err);
     }
+  });
 
-    const wallet = await Wallet.findById(owner.walletId);
-    if (!wallet || wallet.balance < amount) {
-      res.status(400).json({ success: false, error: 'Insufficient balance' });
-      return;
+  // GET /owner/sessions — session history for all owned chargers
+  router.get('/sessions', async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const rows = await db
+        .select({
+          session: chargingSessions,
+          chargerSerial: chargers.serialNumber,
+          chargerLat: chargers.lat,
+          chargerLng: chargers.lng,
+          chargerAddress: chargers.address,
+        })
+        .from(chargingSessions)
+        .leftJoin(chargers, eq(chargingSessions.chargerId, chargers.id))
+        .where(eq(chargingSessions.ownerId, req.user!.sub))
+        .orderBy(desc(chargingSessions.createdAt))
+        .limit(100);
+
+      const data = rows.map((r) => ({
+        ...r.session,
+        charger: {
+          serialNumber: r.chargerSerial,
+          location: { lat: r.chargerLat, lng: r.chargerLng, address: r.chargerAddress },
+        },
+      }));
+
+      res.json({ success: true, data });
+    } catch (err) {
+      next(err);
     }
+  });
 
-    const payout = await Payout.create({
-      ownerId: owner._id,
-      walletId: wallet._id,
-      requestedAmount: amount,
-      status: PayoutStatus.REQUESTED,
-      idempotencyKey: uuidv4(),
-    });
+  // ── Payouts ───────────────────────────────────────────────────────────────────
 
-    res.status(201).json({ success: true, data: { payoutId: payout._id, status: payout.status } });
-  } catch (err) { next(err); }
-});
+  const payoutSchema = z.object({
+    amount: z.number().int().positive(),
+  });
 
-// GET /owner/payouts
-ownerRouter.get('/payouts', async (req: AuthRequest, res: Response, next: NextFunction) => {
-  try {
-    const payouts = await Payout.find({ ownerId: req.user!.sub }).sort({ createdAt: -1 });
-    res.json({ success: true, data: payouts });
-  } catch (err) { next(err); }
-});
+  // POST /owner/payouts/request
+  router.post('/payouts/request', async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const { amount } = payoutSchema.parse(req.body);
+      const [owner] = await db.select().from(owners).where(eq(owners.id, req.user!.sub));
+      if (!owner) {
+        res.status(404).json({ success: false, error: 'Owner not found' });
+        return;
+      }
+
+      if (!owner.kycVerified) {
+        res.status(403).json({ success: false, error: 'KYC not verified — contact support' });
+        return;
+      }
+
+      const [wallet] = await db
+        .select()
+        .from(wallets)
+        .where(and(eq(wallets.ownerType, 'owner'), eq(wallets.ownerId, owner.id)));
+      if (!wallet || wallet.balance < amount) {
+        res.status(400).json({ success: false, error: 'Insufficient balance' });
+        return;
+      }
+
+      const [payout] = await db
+        .insert(payouts)
+        .values({
+          ownerId: owner.id,
+          walletId: wallet.id,
+          requestedAmount: amount,
+          status: PayoutStatus.REQUESTED,
+          idempotencyKey: crypto.randomUUID(),
+        })
+        .returning();
+
+      res.status(201).json({ success: true, data: { payoutId: payout.id, status: payout.status } });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // GET /owner/payouts
+  router.get('/payouts', async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const rows = await db
+        .select()
+        .from(payouts)
+        .where(eq(payouts.ownerId, req.user!.sub))
+        .orderBy(desc(payouts.createdAt));
+      res.json({ success: true, data: rows });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  return router;
+}

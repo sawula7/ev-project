@@ -1,5 +1,4 @@
-import { RPCServer, createRPCError } from 'ocpp-rpc';
-import { IncomingMessage } from 'http';
+import { RPCServer, RPCClient, createRPCError } from 'ocpp-rpc';
 import { eq } from 'drizzle-orm';
 import { logger } from '../config/logger';
 import { config } from '../config';
@@ -13,8 +12,13 @@ import { handleStopTransaction } from './handlers/stopTransaction';
 import { handleMeterValues } from './handlers/meterValues';
 import { ChargerStatus } from '@ev/shared';
 
+// The real client ocpp-rpc hands to server.on('client', ...) is an
+// RpcServerClient (extends RPCClient, adds `.session`) — not exported
+// by the package, so we type the bit of its surface we actually use.
+type OcppClient = InstanceType<typeof RPCClient> & { readonly session: Record<string, any> };
+
 // Maps chargePointId -> RPCClient so we can send RemoteStart/Stop
-export const connectedChargers = new Map<string, InstanceType<typeof RPCServer>['clients'] extends Map<string, infer V> ? V : never>();
+export const connectedChargers = new Map<string, OcppClient>();
 
 export async function createOcppServer(db: Db): Promise<RPCServer> {
   const server = new RPCServer({
@@ -22,21 +26,17 @@ export async function createOcppServer(db: Db): Promise<RPCServer> {
     strictMode: false, // goiot firmware may send non-standard fields
   });
 
-  server.auth(async (accept, reject, handshakeRequest: IncomingMessage) => {
-    // Extract chargePointId from URL path: /ocpp/<chargePointId>
-    const url = handshakeRequest.url ?? '';
-    const chargePointId = url.split('/').pop();
+  server.auth(async (accept, reject, handshake) => {
+    // ocpp-rpc parses the URL path (/ocpp/<chargePointId>) into `identity`
+    // and the Basic Auth header into `password` for us.
+    const chargePointId = handshake.identity;
 
     if (!chargePointId) {
-      reject(new Error('Missing chargePointId in URL'));
+      reject(400, 'Missing chargePointId in URL');
       return;
     }
 
-    // Validate Basic Auth
-    const authHeader = handshakeRequest.headers['authorization'] ?? '';
-    const base64 = authHeader.replace(/^Basic\s+/i, '');
-    const decoded = Buffer.from(base64, 'base64').toString('utf8');
-    const [, password] = decoded.split(':');
+    const password = handshake.password?.toString('utf8');
 
     // Look up charger by serial number (chargePointId == serial number by convention)
     const [charger] = await db.select().from(chargers).where(eq(chargers.serialNumber, chargePointId));
@@ -45,14 +45,14 @@ export async function createOcppServer(db: Db): Promise<RPCServer> {
 
     if (!password || password !== expectedKey) {
       logger.warn({ chargePointId }, 'OCPP auth failed');
-      reject(new Error('Unauthorized'));
+      reject(401, 'Unauthorized');
       return;
     }
 
     accept({ chargePointId, chargerId: charger?.id });
   });
 
-  server.on('client', async (client) => {
+  server.on('client', async (client: OcppClient) => {
     const { chargePointId } = client.session as { chargePointId: string; chargerId?: string };
     logger.info({ chargePointId }, 'OCPP client connected');
     connectedChargers.set(chargePointId, client);
@@ -79,25 +79,25 @@ export async function createOcppServer(db: Db): Promise<RPCServer> {
     // ── Handlers ──────────────────────────────────────────────────────────────
 
     client.handle('BootNotification', ({ params }) =>
-      handleBootNotification(db, chargePointId, params)
+      handleBootNotification(db, chargePointId, params as any)
     );
 
     client.handle('Heartbeat', () => handleHeartbeat(db, chargePointId));
 
     client.handle('StatusNotification', ({ params }) =>
-      handleStatusNotification(db, chargePointId, params)
+      handleStatusNotification(db, chargePointId, params as any)
     );
 
     client.handle('StartTransaction', ({ params }) =>
-      handleStartTransaction(db, chargePointId, params)
+      handleStartTransaction(db, chargePointId, params as any)
     );
 
     client.handle('StopTransaction', ({ params }) =>
-      handleStopTransaction(db, chargePointId, params)
+      handleStopTransaction(db, chargePointId, params as any)
     );
 
     client.handle('MeterValues', ({ params }) =>
-      handleMeterValues(db, chargePointId, params)
+      handleMeterValues(db, chargePointId, params as any)
     );
 
     // Catch-all for unhandled messages — return NotImplemented

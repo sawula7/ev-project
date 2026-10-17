@@ -12,78 +12,80 @@ import dotenv from 'dotenv';
 import path from 'path';
 dotenv.config({ path: path.join(__dirname, '../apps/backend/.env.local') });
 
-import mongoose from 'mongoose';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
+import { getDb, closeDb, chargers, drivers, owners, wallets } from '@ev/db';
 
-const MONGODB_URI = process.env.MONGODB_URI!;
-const JWT_SECRET  = process.env.JWT_SECRET!;
-
-// ── Inline minimal schemas (avoids importing compiled backend) ────────────────
-
-const walletSchema = new mongoose.Schema({ ownerType: String, ownerId: mongoose.Schema.Types.ObjectId, balance: { type: Number, default: 0 }, currency: { type: String, default: 'LKR' } }, { timestamps: true });
-const driverSchema = new mongoose.Schema({ email: String, passwordHash: String, name: String, walletId: mongoose.Schema.Types.ObjectId }, { timestamps: true });
-const ownerSchema  = new mongoose.Schema({ email: String, passwordHash: String, name: String, walletId: mongoose.Schema.Types.ObjectId, kycVerified: { type: Boolean, default: false } }, { timestamps: true });
-const chargerSchema = new mongoose.Schema({
-  serialNumber: { type: String, unique: true },
-  authorizationKey: String,
-  claimCode: String,
-  ownerId: mongoose.Schema.Types.ObjectId,
-  location: { lat: Number, lng: Number, address: String },
-  connectorType: { type: String, default: 'Type2' },
-  pricePerKwh: { type: Number, default: 5000 }, // LKR 50.00 per kWh (in paisa)
-  status: { type: String, default: 'idle' },
-  lastHeartbeat: Date,
-}, { timestamps: true });
-
-const Wallet  = mongoose.model('Wallet',  walletSchema);
-const Driver  = mongoose.model('Driver',  driverSchema);
-const Owner   = mongoose.model('Owner',   ownerSchema);
-const Charger = mongoose.model('Charger', chargerSchema);
+const DATABASE_URL = process.env.DATABASE_URL!;
+const JWT_SECRET = process.env.JWT_SECRET!;
 
 async function main() {
-  await mongoose.connect(MONGODB_URI);
-  console.log('Connected to MongoDB\n');
+  const db = getDb(DATABASE_URL);
+  console.log('Connected to PostgreSQL\n');
 
   // ── Clear existing test data ────────────────────────────────────────────────
-  await Promise.all([Wallet.deleteMany({}), Driver.deleteMany({}), Owner.deleteMany({}), Charger.deleteMany({})]);
+  await db.delete(wallets);
+  await db.delete(drivers);
+  await db.delete(owners);
+  await db.delete(chargers);
 
   // ── Test Driver ─────────────────────────────────────────────────────────────
-  const driverWallet = await Wallet.create({ ownerType: 'driver', ownerId: new mongoose.Types.ObjectId(), balance: 50000, currency: 'LKR' });
-  const driver = await Driver.create({
+  const driverId = crypto.randomUUID();
+  const driverWalletId = crypto.randomUUID();
+
+  await db.insert(drivers).values({
+    id: driverId,
     email: 'driver@test.com',
     passwordHash: await bcrypt.hash('password123', 10),
     name: 'Test Driver',
-    walletId: driverWallet._id,
+    walletId: driverWalletId,
   });
-  driverWallet.ownerId = driver._id as mongoose.Types.ObjectId;
-  await driverWallet.save();
-  const driverToken = jwt.sign({ sub: driver._id.toString(), role: 'driver' }, JWT_SECRET, { expiresIn: '7d' });
+  await db.insert(wallets).values({
+    id: driverWalletId,
+    ownerType: 'driver',
+    ownerId: driverId,
+    balance: 50000,
+    currency: 'LKR',
+  });
+  const driverToken = jwt.sign({ sub: driverId, role: 'driver' }, JWT_SECRET, { expiresIn: '7d' });
 
   // ── Test Owner ──────────────────────────────────────────────────────────────
-  const ownerWallet = await Wallet.create({ ownerType: 'owner', ownerId: new mongoose.Types.ObjectId(), balance: 0, currency: 'LKR' });
-  const owner = await Owner.create({
+  const ownerId = crypto.randomUUID();
+  const ownerWalletId = crypto.randomUUID();
+
+  await db.insert(owners).values({
+    id: ownerId,
     email: 'owner@test.com',
     passwordHash: await bcrypt.hash('password123', 10),
     name: 'Test Owner',
-    walletId: ownerWallet._id,
+    walletId: ownerWalletId,
     kycVerified: true,
   });
-  ownerWallet.ownerId = owner._id as mongoose.Types.ObjectId;
-  await ownerWallet.save();
-  const ownerToken = jwt.sign({ sub: owner._id.toString(), role: 'owner' }, JWT_SECRET, { expiresIn: '7d' });
+  await db.insert(wallets).values({
+    id: ownerWalletId,
+    ownerType: 'owner',
+    ownerId,
+    balance: 0,
+    currency: 'LKR',
+  });
+  const ownerToken = jwt.sign({ sub: ownerId, role: 'owner' }, JWT_SECRET, { expiresIn: '7d' });
 
   // ── Test Charger (pre-claimed by test owner) ────────────────────────────────
-  const charger = await Charger.create({
-    serialNumber: 'TESTUNIT001',
-    authorizationKey: 'testkey123',
-    claimCode: 'TESTCODE',
-    ownerId: owner._id,
-    location: { lat: 6.9271, lng: 79.8612, address: '123 Galle Road, Colombo 03' },
-    connectorType: 'Type2',
-    pricePerKwh: 5000,
-    status: 'idle',
-  });
+  const [charger] = await db
+    .insert(chargers)
+    .values({
+      serialNumber: 'TESTUNIT001',
+      authorizationKey: 'testkey123',
+      claimCode: 'TESTCODE',
+      ownerId,
+      lat: 6.9271,
+      lng: 79.8612,
+      address: '123 Galle Road, Colombo 03',
+      connectorType: 'Type2',
+      pricePerKwh: 5000,
+      status: 'idle',
+    })
+    .returning();
 
   // ── Admin JWT ───────────────────────────────────────────────────────────────
   const adminToken = jwt.sign({ sub: 'admin', role: 'admin' }, JWT_SECRET, { expiresIn: '7d' });
@@ -93,7 +95,7 @@ async function main() {
   console.log('SEED COMPLETE — copy these values for testing\n');
 
   console.log('CHARGER');
-  console.log(`  ID:             ${charger._id}`);
+  console.log(`  ID:             ${charger.id}`);
   console.log(`  Serial:         TESTUNIT001`);
   console.log(`  Auth key:       testkey123`);
   console.log(`  Price/kWh:      5000 paisa = LKR 50.00`);
@@ -101,13 +103,13 @@ async function main() {
   console.log('');
 
   console.log('DRIVER  (email: driver@test.com  password: password123)');
-  console.log(`  ID:     ${driver._id}`);
-  console.log(`  Wallet: LKR ${(driverWallet.balance as number / 100).toFixed(2)} starting balance`);
+  console.log(`  ID:     ${driverId}`);
+  console.log(`  Wallet: LKR ${(50000 / 100).toFixed(2)} starting balance`);
   console.log(`  Token:  ${driverToken}`);
   console.log('');
 
   console.log('OWNER   (email: owner@test.com   password: password123)');
-  console.log(`  ID:     ${owner._id}`);
+  console.log(`  ID:     ${ownerId}`);
   console.log(`  Token:  ${ownerToken}`);
   console.log('');
 
@@ -116,7 +118,10 @@ async function main() {
   console.log('');
   console.log('═══════════════════════════════════════════════════════════');
 
-  await mongoose.disconnect();
+  await closeDb();
 }
 
-main().catch((err) => { console.error(err); process.exit(1); });
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

@@ -6,11 +6,11 @@ Two-sided EV charging marketplace. Drivers find chargers and pay via wallet. Cha
 ## Stack
 - Backend: Node.js + TypeScript, Express
 - OCPP: `ocpp-rpc` library (OCPP 1.6J — NOT 2.0.1)
-- DB: MongoDB (Atlas)
+- DB: PostgreSQL (AWS RDS) via Drizzle ORM (`packages/db`) — migrated from MongoDB/Mongoose
 - Cache/State: Redis (ElastiCache)
 - Mobile: React Native (two apps: Driver, Owner)
 - Admin: React web
-- Infra: AWS ECS Fargate + ALB
+- Infra: AWS CDK — ECS Fargate + ALB + RDS + ElastiCache + fck-nat (see `infra/`)
 
 ## Hardware Facts (confirmed, do not re-derive)
 - OCPP 1.6J, charger connects outbound (charger = client, our backend = CSMS/server)
@@ -23,7 +23,7 @@ Two-sided EV charging marketplace. Drivers find chargers and pay via wallet. Cha
 ## Non-Negotiable Rules
 - All money = integers in smallest currency unit (no floats ever)
 - Every financial mutation has an idempotency key
-- Wallet transfers = single atomic MongoDB multi-document transaction
+- Wallet transfers = single atomic Postgres transaction (Drizzle `db.transaction`)
 - Periodic reconciliation job required
 
 ## Build Phases

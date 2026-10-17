@@ -2,12 +2,15 @@ FROM --platform=linux/arm64 node:20-alpine AS builder
 WORKDIR /app
 COPY package.json yarn.lock ./
 COPY packages/shared/package.json ./packages/shared/
+COPY packages/db/package.json ./packages/db/
 COPY apps/backend/package.json ./apps/backend/
 RUN yarn install --frozen-lockfile
 
 COPY packages/shared ./packages/shared
+COPY packages/db ./packages/db
 COPY apps/backend ./apps/backend
 RUN yarn workspace @ev/shared build
+RUN yarn workspace @ev/db build
 RUN yarn workspace @ev/backend build
 
 FROM --platform=linux/arm64 node:20-alpine AS runner
@@ -16,6 +19,8 @@ ENV NODE_ENV=production
 
 COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
 COPY --from=builder /app/packages/shared/package.json ./packages/shared/package.json
+COPY --from=builder /app/packages/db/dist ./packages/db/dist
+COPY --from=builder /app/packages/db/package.json ./packages/db/package.json
 COPY --from=builder /app/apps/backend/dist ./apps/backend/dist
 COPY --from=builder /app/apps/backend/package.json ./apps/backend/package.json
 COPY --from=builder /app/package.json ./

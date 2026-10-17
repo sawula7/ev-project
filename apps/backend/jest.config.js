@@ -5,5 +5,6 @@ module.exports = {
   testMatch: ['**/__tests__/**/*.test.ts'],
   moduleNameMapper: {
     '^@ev/shared$': '<rootDir>/../../packages/shared/src',
+    '^@ev/db$': '<rootDir>/../../packages/db/src',
   },
 };

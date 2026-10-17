@@ -10,31 +10,31 @@ import { startWatchdog } from './ocpp/watchdog';
 import { startReconciliationJob } from './jobs/reconciliation';
 
 async function main() {
-  await connectDatabase();
+  const db = connectDatabase();
   await getRedis().connect();
 
   // REST API
-  const app = createApp();
+  const app = createApp(db);
   const httpServer = http.createServer(app);
   httpServer.listen(config.port, () => {
     logger.info(`REST API listening on port ${config.port}`);
   });
 
   // OCPP WebSocket server on separate port
-  const ocppServer = await createOcppServer();
+  const ocppServer = await createOcppServer(db);
   ocppServer.listen(config.ocppPort);
   logger.info(`OCPP server listening on port ${config.ocppPort}`);
 
-  startWatchdog();
+  startWatchdog(db);
   logger.info('Heartbeat watchdog started');
 
-  startReconciliationJob();
+  startReconciliationJob(db);
   logger.info('Reconciliation job started (1h interval)');
 
   process.on('SIGTERM', async () => {
     logger.info('SIGTERM received — shutting down');
     httpServer.close();
-    ocppServer.close();
+    ocppServer.close({});
     process.exit(0);
   });
 }

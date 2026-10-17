@@ -11,8 +11,9 @@ Internet
         └── /*       →  API Target Group   →  ECS Fargate (port 3000)
 
 ECS Fargate tasks in private subnets
+RDS PostgreSQL in private subnet (Drizzle ORM, see packages/db)
 ElastiCache Redis in private subnet
-MongoDB Atlas (external — VPC peering recommended)
+fck-nat (EC2 t4g.nano) instead of NAT Gateway — ~$3/mo vs ~$35/mo
 S3 + CloudFront for admin web
 Secrets Manager for all secrets
 ```
@@ -21,8 +22,9 @@ Secrets Manager for all secrets
 
 | Stack | What it creates |
 |-------|----------------|
-| `ev-network-{env}` | VPC, subnets, NAT Gateway, security groups |
+| `ev-network-{env}` | VPC, subnets, fck-nat instance, security groups |
 | `ev-cache-{env}` | ElastiCache Redis (private subnet) |
+| `ev-db-{env}` | RDS PostgreSQL (private subnet, auto-generated credentials secret) |
 | `ev-api-{env}` | ECR repo, ECS cluster, Fargate services, ALB |
 | `ev-frontend-{env}` | S3 bucket + CloudFront for admin web |
 
@@ -41,12 +43,11 @@ cdk bootstrap aws://ACCOUNT_ID/ap-southeast-1
 
 ## Secrets (create before first deploy)
 
+The RDS database credentials are generated automatically by `ev-db-{env}`
+(no manual secret needed for Postgres). You only need to create these:
+
 ```bash
 ENV=prod   # or staging
-
-aws secretsmanager create-secret --region ap-southeast-1 \
-  --name "ev/$ENV/mongodb-uri" \
-  --secret-string "mongodb+srv://user:pass@cluster.mongodb.net/ev_charging"
 
 aws secretsmanager create-secret --region ap-southeast-1 \
   --name "ev/$ENV/jwt-secret" \
@@ -129,6 +130,24 @@ VITE_API_URL=https://your-domain.com yarn build
 aws s3 sync dist/ "s3://$BUCKET" --delete
 aws cloudfront create-invalidation --distribution-id "$DIST_ID" --paths "/*"
 ```
+
+## Push the Drizzle schema to RDS
+
+RDS sits in a private subnet with no public access, so `drizzle-kit push`
+can't reach it directly from your machine. Easiest path for now: run it
+from inside the running API task via ECS Exec:
+
+```bash
+aws ecs execute-command --cluster ev-cluster-prod \
+  --task <api-task-id> --container api --interactive \
+  --command "npx drizzle-kit push --config packages/db/drizzle.config.ts" \
+  --region ap-southeast-1
+```
+
+(Requires `enableExecuteCommand: true` on the service — not yet wired into
+`ApiStack`. A dedicated migration Lambda, run once before each deploy, is
+the more robust long-term answer — add it when schema changes become
+frequent enough to justify it.)
 
 ## Staging environment
 
