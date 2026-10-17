@@ -1,5 +1,5 @@
-import { ChargingSession } from '../../models/ChargingSession';
-import { Charger } from '../../models/Charger';
+import { eq } from 'drizzle-orm';
+import { type Db, chargingSessions, chargers } from '@ev/db';
 import { ChargerStatus, SessionStatus } from '@ev/shared';
 import { getRedis } from '../../config/redis';
 import { logger } from '../../config/logger';
@@ -13,6 +13,7 @@ interface StartTransactionParams {
 }
 
 export async function handleStartTransaction(
+  db: Db,
   chargePointId: string,
   params: StartTransactionParams
 ) {
@@ -20,7 +21,7 @@ export async function handleStartTransaction(
 
   // idTag carries our session id (set when we sent RemoteStartTransaction)
   const sessionId = params.idTag;
-  const session = await ChargingSession.findById(sessionId);
+  const [session] = await db.select().from(chargingSessions).where(eq(chargingSessions.id, sessionId));
 
   if (!session || session.status !== SessionStatus.INITIATED) {
     logger.warn({ chargePointId, sessionId }, 'StartTransaction: session not found or wrong status');
@@ -28,24 +29,30 @@ export async function handleStartTransaction(
   }
 
   const transactionId = Date.now(); // simple incrementing id via timestamp; good enough for single-charger
-  session.ocppTransactionId = transactionId;
-  session.status = SessionStatus.ACTIVE;
-  session.startTime = new Date(params.timestamp);
-  session.energyDeliveredWh = 0;
-  await session.save();
+
+  await db
+    .update(chargingSessions)
+    .set({
+      ocppTransactionId: transactionId,
+      status: SessionStatus.ACTIVE,
+      startTime: new Date(params.timestamp),
+      energyDeliveredWh: 0,
+      updatedAt: new Date(),
+    })
+    .where(eq(chargingSessions.id, session.id));
 
   // Cache active session in Redis for fast MeterValues lookup
   await getRedis().set(
     `ocpp:session:${chargePointId}`,
-    JSON.stringify({ sessionId: session._id.toString(), transactionId, meterStart: params.meterStart }),
+    JSON.stringify({ sessionId: session.id, transactionId, meterStart: params.meterStart }),
     'EX',
     86400 // 24h TTL safety net
   );
 
-  await Charger.updateOne(
-    { serialNumber: chargePointId },
-    { $set: { status: ChargerStatus.CHARGING } }
-  );
+  await db
+    .update(chargers)
+    .set({ status: ChargerStatus.CHARGING, updatedAt: new Date() })
+    .where(eq(chargers.serialNumber, chargePointId));
 
   return {
     transactionId,

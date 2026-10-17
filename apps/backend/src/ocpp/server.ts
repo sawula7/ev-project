@@ -1,8 +1,9 @@
 import { RPCServer, createRPCError } from 'ocpp-rpc';
 import { IncomingMessage } from 'http';
+import { eq } from 'drizzle-orm';
 import { logger } from '../config/logger';
 import { config } from '../config';
-import { Charger } from '../models/Charger';
+import { type Db, chargers } from '@ev/db';
 import { getRedis } from '../config/redis';
 import { handleBootNotification } from './handlers/bootNotification';
 import { handleHeartbeat } from './handlers/heartbeat';
@@ -15,7 +16,7 @@ import { ChargerStatus } from '@ev/shared';
 // Maps chargePointId -> RPCClient so we can send RemoteStart/Stop
 export const connectedChargers = new Map<string, InstanceType<typeof RPCServer>['clients'] extends Map<string, infer V> ? V : never>();
 
-export async function createOcppServer(): Promise<RPCServer> {
+export async function createOcppServer(db: Db): Promise<RPCServer> {
   const server = new RPCServer({
     protocols: ['ocpp1.6'],
     strictMode: false, // goiot firmware may send non-standard fields
@@ -38,7 +39,7 @@ export async function createOcppServer(): Promise<RPCServer> {
     const [, password] = decoded.split(':');
 
     // Look up charger by serial number (chargePointId == serial number by convention)
-    const charger = await Charger.findOne({ serialNumber: chargePointId });
+    const [charger] = await db.select().from(chargers).where(eq(chargers.serialNumber, chargePointId));
 
     const expectedKey = charger?.authorizationKey ?? config.ocppDefaultAuthKey;
 
@@ -48,7 +49,7 @@ export async function createOcppServer(): Promise<RPCServer> {
       return;
     }
 
-    accept({ chargePointId, chargerId: charger?._id?.toString() });
+    accept({ chargePointId, chargerId: charger?.id });
   });
 
   server.on('client', async (client) => {
@@ -57,43 +58,46 @@ export async function createOcppServer(): Promise<RPCServer> {
     connectedChargers.set(chargePointId, client);
 
     // Mark charger as online if it was offline
-    await Charger.updateOne(
-      { serialNumber: chargePointId, status: ChargerStatus.OFFLINE },
-      { $set: { status: ChargerStatus.IDLE } }
-    );
+    const [existing] = await db.select().from(chargers).where(eq(chargers.serialNumber, chargePointId));
+    if (existing?.status === ChargerStatus.OFFLINE) {
+      await db
+        .update(chargers)
+        .set({ status: ChargerStatus.IDLE, updatedAt: new Date() })
+        .where(eq(chargers.serialNumber, chargePointId));
+    }
 
     client.on('disconnect', async () => {
       logger.info({ chargePointId }, 'OCPP client disconnected');
       connectedChargers.delete(chargePointId);
       await getRedis().del(`ocpp:session:${chargePointId}`);
-      await Charger.updateOne(
-        { serialNumber: chargePointId },
-        { $set: { status: ChargerStatus.OFFLINE } }
-      );
+      await db
+        .update(chargers)
+        .set({ status: ChargerStatus.OFFLINE, updatedAt: new Date() })
+        .where(eq(chargers.serialNumber, chargePointId));
     });
 
     // ── Handlers ──────────────────────────────────────────────────────────────
 
     client.handle('BootNotification', ({ params }) =>
-      handleBootNotification(chargePointId, params)
+      handleBootNotification(db, chargePointId, params)
     );
 
-    client.handle('Heartbeat', () => handleHeartbeat(chargePointId));
+    client.handle('Heartbeat', () => handleHeartbeat(db, chargePointId));
 
     client.handle('StatusNotification', ({ params }) =>
-      handleStatusNotification(chargePointId, params)
+      handleStatusNotification(db, chargePointId, params)
     );
 
     client.handle('StartTransaction', ({ params }) =>
-      handleStartTransaction(chargePointId, params)
+      handleStartTransaction(db, chargePointId, params)
     );
 
     client.handle('StopTransaction', ({ params }) =>
-      handleStopTransaction(chargePointId, params)
+      handleStopTransaction(db, chargePointId, params)
     );
 
     client.handle('MeterValues', ({ params }) =>
-      handleMeterValues(chargePointId, params)
+      handleMeterValues(db, chargePointId, params)
     );
 
     // Catch-all for unhandled messages — return NotImplemented

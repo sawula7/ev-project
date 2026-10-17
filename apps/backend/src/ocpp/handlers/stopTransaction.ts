@@ -1,5 +1,5 @@
-import { ChargingSession } from '../../models/ChargingSession';
-import { Charger } from '../../models/Charger';
+import { eq } from 'drizzle-orm';
+import { type Db, type ChargingSession, chargingSessions, chargers } from '@ev/db';
 import { ChargerStatus, SessionStatus } from '@ev/shared';
 import { getRedis } from '../../config/redis';
 import { logger } from '../../config/logger';
@@ -16,6 +16,7 @@ interface StopTransactionParams {
 }
 
 export async function handleStopTransaction(
+  db: Db,
   chargePointId: string,
   params: StopTransactionParams
 ) {
@@ -35,13 +36,13 @@ export async function handleStopTransaction(
     meterStart: number;
   };
 
-  const session = await ChargingSession.findById(sessionId);
+  const [session] = await db.select().from(chargingSessions).where(eq(chargingSessions.id, sessionId));
   if (!session) {
     logger.warn({ sessionId }, 'StopTransaction: session not found');
     return { idTagInfo: { status: 'Accepted' } };
   }
 
-  const charger = await Charger.findOne({ serialNumber: chargePointId });
+  const [charger] = await db.select().from(chargers).where(eq(chargers.serialNumber, chargePointId));
 
   const deliveredWh = Math.max(0, params.meterStop - meterStart);
   const pricePerKwh = charger?.pricePerKwh ?? 0;
@@ -51,25 +52,41 @@ export async function handleStopTransaction(
   );
   const ownerPayoutAmount = grossAmount - commissionAmount;
 
-  session.status = SessionStatus.COMPLETED;
-  session.stopTime = new Date(params.timestamp);
-  session.energyDeliveredWh = deliveredWh;
-  session.grossAmount = grossAmount;
-  session.commissionAmount = commissionAmount;
-  session.ownerPayoutAmount = ownerPayoutAmount;
-  session.stopReason = params.reason;
-  await session.save();
+  const updatedSession: ChargingSession = {
+    ...session,
+    status: SessionStatus.COMPLETED,
+    stopTime: new Date(params.timestamp),
+    energyDeliveredWh: deliveredWh,
+    grossAmount,
+    commissionAmount,
+    ownerPayoutAmount,
+    stopReason: params.reason ?? null,
+  };
+
+  await db
+    .update(chargingSessions)
+    .set({
+      status: updatedSession.status,
+      stopTime: updatedSession.stopTime,
+      energyDeliveredWh: updatedSession.energyDeliveredWh,
+      grossAmount: updatedSession.grossAmount,
+      commissionAmount: updatedSession.commissionAmount,
+      ownerPayoutAmount: updatedSession.ownerPayoutAmount,
+      stopReason: updatedSession.stopReason,
+      updatedAt: new Date(),
+    })
+    .where(eq(chargingSessions.id, session.id));
 
   await redis.del(`ocpp:session:${chargePointId}`);
 
-  await Charger.updateOne(
-    { serialNumber: chargePointId },
-    { $set: { status: ChargerStatus.IDLE } }
-  );
+  await db
+    .update(chargers)
+    .set({ status: ChargerStatus.IDLE, updatedAt: new Date() })
+    .where(eq(chargers.serialNumber, chargePointId));
 
   // Finalise payment (Phase 1: direct gateway charge; Phase 2+: wallet debit)
   try {
-    await finalizeSessionPayment(session);
+    await finalizeSessionPayment(db, updatedSession);
   } catch (err) {
     logger.error({ err, sessionId }, 'Failed to finalise session payment');
     // Don't fail the OCPP response — session is recorded, payment can be retried

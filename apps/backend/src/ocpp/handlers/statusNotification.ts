@@ -1,4 +1,5 @@
-import { Charger } from '../../models/Charger';
+import { eq } from 'drizzle-orm';
+import { type Db, chargers } from '@ev/db';
 import { ChargerStatus } from '@ev/shared';
 import { logger } from '../../config/logger';
 
@@ -31,6 +32,7 @@ function mapOcppStatus(ocppStatus: string, errorCode: string): ChargerStatus {
 }
 
 export async function handleStatusNotification(
+  db: Db,
   chargePointId: string,
   params: StatusNotificationParams
 ) {
@@ -40,17 +42,17 @@ export async function handleStatusNotification(
   if (params.connectorId === 0) {
     // Charger-level status — update only for fault/unavailable
     if (params.errorCode !== 'NoError' || params.status === 'Faulted') {
-      await Charger.updateOne(
-        { serialNumber: chargePointId },
-        { $set: { status: ChargerStatus.FAULTED } }
-      );
+      await db
+        .update(chargers)
+        .set({ status: ChargerStatus.FAULTED, updatedAt: new Date() })
+        .where(eq(chargers.serialNumber, chargePointId));
     }
   } else {
     const status = mapOcppStatus(params.status, params.errorCode);
-    await Charger.updateOne(
-      { serialNumber: chargePointId },
-      { $set: { status } }
-    );
+    await db
+      .update(chargers)
+      .set({ status, updatedAt: new Date() })
+      .where(eq(chargers.serialNumber, chargePointId));
   }
 
   return {};

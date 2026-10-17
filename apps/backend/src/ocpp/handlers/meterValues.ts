@@ -1,9 +1,8 @@
-import { ChargingSession } from '../../models/ChargingSession';
-import { Charger } from '../../models/Charger';
+import { eq } from 'drizzle-orm';
+import { type Db, chargingSessions, chargers } from '@ev/db';
+import { SessionStatus } from '@ev/shared';
 import { getRedis } from '../../config/redis';
 import { logger } from '../../config/logger';
-import { connectedChargers } from '../server';
-import { SessionStatus } from '@ev/shared';
 
 interface SampledValue {
   value: string;
@@ -27,6 +26,7 @@ interface MeterValuesParams {
 }
 
 export async function handleMeterValues(
+  db: Db,
   chargePointId: string,
   params: MeterValuesParams
 ) {
@@ -67,18 +67,19 @@ export async function handleMeterValues(
   }
 
   const deliveredWh = Math.max(0, latestEnergyWh - meterStart);
-  const session = await ChargingSession.findById(sessionId);
+  const [session] = await db.select().from(chargingSessions).where(eq(chargingSessions.id, sessionId));
   if (!session || session.status !== SessionStatus.ACTIVE) return {};
 
-  const charger = await Charger.findOne({ serialNumber: chargePointId });
+  const [charger] = await db.select().from(chargers).where(eq(chargers.serialNumber, chargePointId));
   if (!charger) return {};
 
   // Compute cost: pricePerKwh (integer per kWh) * deliveredWh / 1000
   const grossAmount = Math.floor((charger.pricePerKwh * deliveredWh) / 1000);
 
-  session.energyDeliveredWh = deliveredWh;
-  session.accruedAmount = grossAmount;
-  await session.save();
+  await db
+    .update(chargingSessions)
+    .set({ energyDeliveredWh: deliveredWh, accruedAmount: grossAmount, updatedAt: new Date() })
+    .where(eq(chargingSessions.id, session.id));
 
   logger.debug(
     { chargePointId, deliveredWh, grossAmount },
