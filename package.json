@@ -4,7 +4,8 @@
   "workspaces": [
     "packages/*",
     "apps/backend",
-    "apps/admin-web"
+    "apps/admin-web",
+    "infra"
   ],
   "scripts": {
     "dev:backend": "yarn workspace @ev/backend dev",
@@ -15,6 +16,10 @@
     "build:admin": "yarn workspace @ev/admin-web build",
     "seed": "npx ts-node --project apps/backend/tsconfig.json scripts/seed.ts",
     "simulate": "node scripts/simulate-charger.js",
-    "test:local": "bash scripts/local-test.sh"
+    "test:local": "bash scripts/local-test.sh",
+    "cdk": "yarn workspace @ev/infra cdk",
+    "infra:diff": "yarn workspace @ev/infra diff",
+    "infra:deploy": "yarn workspace @ev/infra deploy",
+    "infra:destroy": "yarn workspace @ev/infra destroy"
   }
 }

@@ -1,48 +1,147 @@
-# Infrastructure
+# EV Charging — AWS Infrastructure (CDK)
 
-AWS region: `ap-southeast-1` (Singapore)
+## Region: ap-southeast-1 (Singapore)
 
-## Architecture overview
+## Architecture
 
 ```
 Internet
   └── ALB (HTTPS :443)
-        ├── /ocpp/*  → OCPP Target Group  → ECS Fargate (OCPP service)
-        └── /*       → API Target Group   → ECS Fargate (REST API service)
+        ├── /ocpp/*  →  OCPP Target Group  →  ECS Fargate (port 9000)
+        └── /*       →  API Target Group   →  ECS Fargate (port 3000)
 
-Fargate tasks → private subnets
-NAT Gateway   → outbound (Atlas, payment gateway, SNS)
-MongoDB Atlas → VPC peering or Private Endpoint
-ElastiCache   → Redis (private subnet)
-Secrets Manager → per-charger AuthorizationKey, JWT secret, gateway creds
-SNS           → push notifications (APNs + FCM) — Phase 4
+ECS Fargate tasks in private subnets
+ElastiCache Redis in private subnet
+MongoDB Atlas (external — VPC peering recommended)
+S3 + CloudFront for admin web
+Secrets Manager for all secrets
 ```
 
-## Services
+## Stacks
 
-| Service | Container port | ALB rule |
-|---------|---------------|----------|
-| REST API | 3000 | default (`/*`) |
-| OCPP WS | 9000 | path `/ocpp/*` |
+| Stack | What it creates |
+|-------|----------------|
+| `ev-network-{env}` | VPC, subnets, NAT Gateway, security groups |
+| `ev-cache-{env}` | ElastiCache Redis (private subnet) |
+| `ev-api-{env}` | ECR repo, ECS cluster, Fargate services, ALB |
+| `ev-frontend-{env}` | S3 bucket + CloudFront for admin web |
 
-Both services share one Docker image but different ECS task definitions
-so they can be scaled and deployed independently.
+## Prerequisites
 
-## ECS task environment variables
+```bash
+# Install AWS CDK
+npm i -g aws-cdk
 
-All secrets come from AWS Secrets Manager via ECS secret injection
-(not baked into the image or passed as plaintext env vars).
+# Configure AWS credentials
+aws configure   # set region to ap-southeast-1
 
-Required:
-- `MONGODB_URI`
-- `JWT_SECRET`
-- `REDIS_URL`
-- `OCPP_DEFAULT_AUTH_KEY` (dev/test only — production uses per-unit keys from DB)
+# Bootstrap CDK (once per account/region)
+cdk bootstrap aws://ACCOUNT_ID/ap-southeast-1
+```
 
-## TLS
+## Secrets (create before first deploy)
 
-TLS terminates at the ALB. The ALB forwards plain `ws://` and `http://`
-to the Fargate tasks internally. ACM certificate covers the domain.
+```bash
+ENV=prod   # or staging
 
-If charger firmware confirms `wss://` support, point the charger at the ALB
-domain on port 443 — no changes needed on the server side.
+aws secretsmanager create-secret --region ap-southeast-1 \
+  --name "ev/$ENV/mongodb-uri" \
+  --secret-string "mongodb+srv://user:pass@cluster.mongodb.net/ev_charging"
+
+aws secretsmanager create-secret --region ap-southeast-1 \
+  --name "ev/$ENV/jwt-secret" \
+  --secret-string "$(openssl rand -hex 32)"
+
+aws secretsmanager create-secret --region ap-southeast-1 \
+  --name "ev/$ENV/redis-url" \
+  --secret-string "rediss://your-elasticache-endpoint:6379"
+
+aws secretsmanager create-secret --region ap-southeast-1 \
+  --name "ev/$ENV/ocpp-default-auth-key" \
+  --secret-string "your-fleet-auth-key"
+```
+
+## Deploy
+
+```bash
+cd infra
+yarn install
+
+# Preview changes
+cdk diff --context env=prod
+
+# Deploy all stacks
+cdk deploy --all --context env=prod
+
+# Deploy with TLS certificate (ACM cert ARN in same region)
+cdk deploy --all --context env=prod --context certificateArn=arn:aws:acm:...
+```
+
+## Build & push Docker image
+
+After `cdk deploy`, use the ECR URI from the `ev-api-prod.EcrRepoUri` output:
+
+```bash
+ECR_URI=$(aws cloudformation describe-stacks \
+  --stack-name ev-api-prod \
+  --query 'Stacks[0].Outputs[?OutputKey==`EcrRepoUri`].OutputValue' \
+  --output text \
+  --region ap-southeast-1)
+
+aws ecr get-login-password --region ap-southeast-1 | \
+  docker login --username AWS --password-stdin "$ECR_URI"
+
+docker build -f apps/backend/Dockerfile -t ev-backend .
+docker tag ev-backend:latest "$ECR_URI:latest"
+docker push "$ECR_URI:latest"
+
+# Force ECS to pull the new image
+aws ecs update-service \
+  --cluster ev-cluster-prod \
+  --service ev-api-prod \
+  --force-new-deployment \
+  --region ap-southeast-1
+
+aws ecs update-service \
+  --cluster ev-cluster-prod \
+  --service ev-ocpp-prod \
+  --force-new-deployment \
+  --region ap-southeast-1
+```
+
+## Deploy admin web
+
+```bash
+BUCKET=$(aws cloudformation describe-stacks \
+  --stack-name ev-frontend-prod \
+  --query 'Stacks[0].Outputs[?OutputKey==`BucketName`].OutputValue' \
+  --output text \
+  --region ap-southeast-1)
+
+DIST_ID=$(aws cloudformation describe-stacks \
+  --stack-name ev-frontend-prod \
+  --query 'Stacks[0].Outputs[?OutputKey==`DistributionId`].OutputValue' \
+  --output text \
+  --region ap-southeast-1)
+
+cd apps/admin-web
+VITE_API_URL=https://your-domain.com yarn build
+aws s3 sync dist/ "s3://$BUCKET" --delete
+aws cloudfront create-invalidation --distribution-id "$DIST_ID" --paths "/*"
+```
+
+## Staging environment
+
+```bash
+# Deploy a full isolated staging environment
+cdk deploy --all --context env=staging
+```
+
+Each environment gets its own VPC, ECS cluster, Redis, and ALB.
+Staging secrets live under `ev/staging/*` in Secrets Manager.
+
+## Tear down
+
+```bash
+cdk destroy --all --context env=staging
+```
