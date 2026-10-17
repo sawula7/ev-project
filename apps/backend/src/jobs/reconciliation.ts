@@ -1,5 +1,5 @@
-import { Wallet } from '../models/Wallet';
-import { LedgerEntry } from '../models/LedgerEntry';
+import { eq, sql } from 'drizzle-orm';
+import { type Db, wallets, ledgerEntries } from '@ev/db';
 import { LedgerEntryType } from '@ev/shared';
 import { logger } from '../config/logger';
 
@@ -8,22 +8,24 @@ import { logger } from '../config/logger';
 // Invariant: sum of all wallet balances must equal
 //   total TOPUPs − total PAYOUTS (what's actually held on behalf of users).
 // Any drift indicates a missed ledger entry or a double-credit bug.
-export async function runReconciliation(): Promise<void> {
-  const [walletsResult, topupResult, payoutResult] = await Promise.all([
-    Wallet.aggregate([{ $group: { _id: null, total: { $sum: '$balance' } } }]),
-    LedgerEntry.aggregate([
-      { $match: { type: LedgerEntryType.TOPUP } },
-      { $group: { _id: null, total: { $sum: '$amount' } } },
-    ]),
-    LedgerEntry.aggregate([
-      { $match: { type: LedgerEntryType.PAYOUT } },
-      { $group: { _id: null, total: { $sum: '$amount' } } },
-    ]),
-  ]);
+export async function runReconciliation(db: Db): Promise<void> {
+  const [walletRow] = await db
+    .select({ total: sql<string>`coalesce(sum(${wallets.balance}), 0)` })
+    .from(wallets);
 
-  const walletTotal: number = walletsResult[0]?.total ?? 0;
-  const topupTotal: number = topupResult[0]?.total ?? 0;
-  const payoutTotal: number = payoutResult[0]?.total ?? 0;
+  const [topupRow] = await db
+    .select({ total: sql<string>`coalesce(sum(${ledgerEntries.amount}), 0)` })
+    .from(ledgerEntries)
+    .where(eq(ledgerEntries.type, LedgerEntryType.TOPUP));
+
+  const [payoutRow] = await db
+    .select({ total: sql<string>`coalesce(sum(${ledgerEntries.amount}), 0)` })
+    .from(ledgerEntries)
+    .where(eq(ledgerEntries.type, LedgerEntryType.PAYOUT));
+
+  const walletTotal = Number(walletRow.total);
+  const topupTotal = Number(topupRow.total);
+  const payoutTotal = Number(payoutRow.total);
 
   // Expected held amount = topups received − payouts sent
   const expected = topupTotal - payoutTotal;
@@ -44,9 +46,9 @@ export async function runReconciliation(): Promise<void> {
 }
 
 // Schedule: call this from index.ts or an ECS scheduled task
-export function startReconciliationJob(intervalMs = 60 * 60 * 1000): NodeJS.Timeout {
+export function startReconciliationJob(db: Db, intervalMs = 60 * 60 * 1000): NodeJS.Timeout {
   return setInterval(() => {
-    runReconciliation().catch((err) =>
+    runReconciliation(db).catch((err) =>
       logger.error({ err }, 'Reconciliation job error')
     );
   }, intervalMs);

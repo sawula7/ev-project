@@ -6,7 +6,7 @@ export const chargingSessions = pgTable('charging_sessions', {
   chargerId:             text('charger_id').notNull(),
   ownerId:               text('owner_id'),
   ocppTransactionId:     integer('ocpp_transaction_id'),
-  status:                text('status').notNull().default('pending'),
+  status:                text('status').notNull().default('initiated'),
   startTime:             timestamp('start_time'),
   stopTime:              timestamp('stop_time'),
   energyDeliveredWh:     integer('energy_delivered_wh').notNull().default(0),
