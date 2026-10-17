@@ -47,6 +47,11 @@ info "Installing dependencies…"
 yarn install --silent
 ok "Dependencies installed"
 
+info "Building @ev/shared and @ev/db (backend resolves them via dist, not src)…"
+yarn build:shared >/dev/null
+yarn build:db >/dev/null
+ok "Workspace packages built"
+
 # ── 2. Start PostgreSQL + Redis ──────────────────────────────────────────────
 
 info "Starting PostgreSQL and Redis via Docker Compose…"

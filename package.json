@@ -12,6 +12,7 @@
     "build:backend": "yarn workspace @ev/backend build",
     "test:backend": "yarn workspace @ev/backend test",
     "build:shared": "yarn workspace @ev/shared build",
+    "build:db": "yarn workspace @ev/db build",
     "dev:admin": "yarn workspace @ev/admin-web dev",
     "build:admin": "yarn workspace @ev/admin-web build",
     "seed": "npx ts-node --project apps/backend/tsconfig.json scripts/seed.ts",
