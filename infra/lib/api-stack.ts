@@ -44,7 +44,8 @@ export class ApiStack extends cdk.Stack {
     const cluster = new ecs.Cluster(this, 'Cluster', {
       clusterName: `ev-cluster-${props.envName}`,
       vpc: props.vpc,
-      containerInsights: true,
+      // Container Insights adds ~$5/month — disable for pilot, enable for prod
+      containerInsights: props.envName === 'prod',
     });
 
     // ── Task execution role ────────────────────────────────────────────────────
@@ -58,15 +59,15 @@ export class ApiStack extends cdk.Stack {
       s.grantRead(executionRole)
     );
 
-    // ── Shared container environment ───────────────────────────────────────────
-    const sharedEnv: Record<string, ecs.Secret> = {
-      MONGODB_URI:             ecs.Secret.fromSecretsManager(mongoSecret),
-      JWT_SECRET:              ecs.Secret.fromSecretsManager(jwtSecret),
-      REDIS_URL:               ecs.Secret.fromSecretsManager(redisSecret),
-      OCPP_DEFAULT_AUTH_KEY:   ecs.Secret.fromSecretsManager(ocppAuthKey),
+    // ── Shared config ──────────────────────────────────────────────────────────
+    const sharedSecrets: Record<string, ecs.Secret> = {
+      MONGODB_URI:           ecs.Secret.fromSecretsManager(mongoSecret),
+      JWT_SECRET:            ecs.Secret.fromSecretsManager(jwtSecret),
+      REDIS_URL:             ecs.Secret.fromSecretsManager(redisSecret),
+      OCPP_DEFAULT_AUTH_KEY: ecs.Secret.fromSecretsManager(ocppAuthKey),
     };
 
-    const sharedPlain: Record<string, string> = {
+    const sharedEnv: Record<string, string> = {
       NODE_ENV:            'production',
       COMMISSION_RATE_BPS: '1000',
       LOG_LEVEL:           'info',
@@ -74,21 +75,28 @@ export class ApiStack extends cdk.Stack {
 
     const image = ecs.ContainerImage.fromEcrRepository(repo, 'latest');
 
-    // ── REST API service ───────────────────────────────────────────────────────
+    // Graviton (ARM) tasks: 20% cheaper than x86 at same spec
+    const runtimePlatform: ecs.RuntimePlatform = {
+      operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
+      cpuArchitecture:       ecs.CpuArchitecture.ARM64,
+    };
+
+    // ── REST API task (Fargate Spot — up to 70% cheaper, handles interruptions) ─
     const apiTaskDef = new ecs.FargateTaskDefinition(this, 'ApiTask', {
       cpu: 256,
       memoryLimitMiB: 512,
       executionRole,
+      runtimePlatform,
     });
     apiTaskDef.addContainer('api', {
       image,
       containerName: 'api',
-      secrets: sharedEnv,
-      environment: { ...sharedPlain, PORT: '3000' },
+      secrets: sharedSecrets,
+      environment: { ...sharedEnv, PORT: '3000' },
       portMappings: [{ containerPort: 3000 }],
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: `ev-api-${props.envName}`,
-        logRetention: logs.RetentionDays.ONE_MONTH,
+        logRetention: logs.RetentionDays.TWO_WEEKS,
       }),
       healthCheck: {
         command: ['CMD-SHELL', 'wget -qO- http://localhost:3000/health || exit 1'],
@@ -98,34 +106,41 @@ export class ApiStack extends cdk.Stack {
       },
     });
 
+    // REST API: 1 task on Spot (stateless, safe to interrupt — reconnects to MongoDB/Redis)
     const apiService = new ecs.FargateService(this, 'ApiService', {
       cluster,
       taskDefinition: apiTaskDef,
       serviceName: `ev-api-${props.envName}`,
-      desiredCount: 2,
+      desiredCount: 1,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       securityGroups: [props.ecsSecurityGroup],
       assignPublicIp: false,
+      capacityProviderStrategies: [
+        { capacityProvider: 'FARGATE_SPOT',   weight: 4 },
+        { capacityProvider: 'FARGATE',         weight: 1 }, // fallback if no Spot available
+      ],
     });
 
-    // ── OCPP service ───────────────────────────────────────────────────────────
+    // ── OCPP task (on-demand — WebSocket sessions must not be interrupted) ──────
     const ocppTaskDef = new ecs.FargateTaskDefinition(this, 'OcppTask', {
-      cpu: 512,
-      memoryLimitMiB: 1024,
+      cpu: 256,
+      memoryLimitMiB: 512,
       executionRole,
+      runtimePlatform,
     });
     ocppTaskDef.addContainer('ocpp', {
       image,
       containerName: 'ocpp',
-      secrets: sharedEnv,
-      environment: { ...sharedPlain, PORT: '3000', OCPP_PORT: '9000' },
+      secrets: sharedSecrets,
+      environment: { ...sharedEnv, PORT: '3000', OCPP_PORT: '9000' },
       portMappings: [{ containerPort: 9000 }],
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: `ev-ocpp-${props.envName}`,
-        logRetention: logs.RetentionDays.ONE_MONTH,
+        logRetention: logs.RetentionDays.TWO_WEEKS,
       }),
     });
 
+    // OCPP: on-demand only — Spot interruption would drop live charger connections
     const ocppService = new ecs.FargateService(this, 'OcppService', {
       cluster,
       taskDefinition: ocppTaskDef,
@@ -134,6 +149,9 @@ export class ApiStack extends cdk.Stack {
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       securityGroups: [props.ecsSecurityGroup],
       assignPublicIp: false,
+      capacityProviderStrategies: [
+        { capacityProvider: 'FARGATE', weight: 1 },
+      ],
     });
 
     // ── ALB ────────────────────────────────────────────────────────────────────
@@ -153,18 +171,14 @@ export class ApiStack extends cdk.Stack {
       }),
     });
 
-    // HTTPS listener — certificate ARN supplied via context
     const certArn = this.node.tryGetContext('certificateArn');
     const httpsListener = alb.addListener('Https', {
       port: 443,
-      certificates: certArn
-        ? [elbv2.ListenerCertificate.fromArn(certArn)]
-        : [],
-      // Without a cert in non-prod, fall back to HTTP on 80 — override in prod
+      certificates: certArn ? [elbv2.ListenerCertificate.fromArn(certArn)] : [],
       ...(certArn ? {} : { protocol: elbv2.ApplicationProtocol.HTTP, port: 80 }),
     });
 
-    // /ocpp/* → OCPP target group (WebSocket, no stickiness — state in Redis)
+    // /ocpp/* → OCPP (WebSocket — no stickiness, state in Redis)
     const ocppTg = new elbv2.ApplicationTargetGroup(this, 'OcppTg', {
       targetGroupName: `ev-ocpp-tg-${props.envName}`,
       vpc: props.vpc,
@@ -172,10 +186,9 @@ export class ApiStack extends cdk.Stack {
       protocol: elbv2.ApplicationProtocol.HTTP,
       targets: [ocppService],
       healthCheck: { path: '/health', port: '3000' },
-      stickinessCookieDuration: undefined,
     });
 
-    // Default → REST API target group
+    // default → REST API
     const apiTg = new elbv2.ApplicationTargetGroup(this, 'ApiTg', {
       targetGroupName: `ev-api-tg-${props.envName}`,
       vpc: props.vpc,
@@ -193,10 +206,10 @@ export class ApiStack extends cdk.Stack {
     httpsListener.addDefaultAction(elbv2.ListenerAction.forward([apiTg]));
 
     // ── Outputs ────────────────────────────────────────────────────────────────
-    new cdk.CfnOutput(this, 'AlbDnsName',  { value: alb.loadBalancerDnsName });
-    new cdk.CfnOutput(this, 'EcrRepoUri',  { value: repo.repositoryUri });
-    new cdk.CfnOutput(this, 'ClusterName', { value: cluster.clusterName });
-    new cdk.CfnOutput(this, 'ApiServiceName',  { value: apiService.serviceName });
-    new cdk.CfnOutput(this, 'OcppServiceName', { value: ocppService.serviceName });
+    new cdk.CfnOutput(this, 'AlbDnsName',       { value: alb.loadBalancerDnsName });
+    new cdk.CfnOutput(this, 'EcrRepoUri',       { value: repo.repositoryUri });
+    new cdk.CfnOutput(this, 'ClusterName',      { value: cluster.clusterName });
+    new cdk.CfnOutput(this, 'ApiServiceName',   { value: apiService.serviceName });
+    new cdk.CfnOutput(this, 'OcppServiceName',  { value: ocppService.serviceName });
   }
 }

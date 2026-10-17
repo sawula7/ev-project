@@ -1,4 +1,4 @@
-FROM node:20-alpine AS builder
+FROM --platform=linux/arm64 node:20-alpine AS builder
 WORKDIR /app
 COPY package.json yarn.lock ./
 COPY packages/shared/package.json ./packages/shared/
@@ -10,7 +10,7 @@ COPY apps/backend ./apps/backend
 RUN yarn workspace @ev/shared build
 RUN yarn workspace @ev/backend build
 
-FROM node:20-alpine AS runner
+FROM --platform=linux/arm64 node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 

@@ -28,9 +28,10 @@ export class CacheStack extends cdk.Stack {
       cacheSubnetGroupName: `ev-redis-subnet-${props.envName}`,
     });
 
+    // t2.micro (~$12/month) — sufficient for OCPP session state at pilot scale
     const redis = new elasticache.CfnReplicationGroup(this, 'Redis', {
       replicationGroupDescription: `ev-redis-${props.envName}`,
-      cacheNodeType: 'cache.t3.micro',
+      cacheNodeType: 'cache.t2.micro',
       engine: 'redis',
       engineVersion: '7.0',
       numCacheClusters: 1,
