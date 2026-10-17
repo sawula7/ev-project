@@ -10,7 +10,8 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "paths": {
-      "@ev/shared": ["../../packages/shared/src"]
+      "@ev/shared": ["../../packages/shared/src"],
+      "@ev/db": ["../../packages/db/src"]
     }
   },
   "include": ["src"],

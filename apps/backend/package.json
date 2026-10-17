@@ -10,8 +10,10 @@
   },
   "dependencies": {
     "@ev/shared": "*",
+    "@ev/db": "*",
     "express": "^4.19.2",
-    "mongoose": "^8.4.0",
+    "drizzle-orm": "^0.30.10",
+    "postgres": "^3.4.4",
     "ioredis": "^5.4.1",
     "ocpp-rpc": "^0.3.0",
     "ws": "^8.17.0",

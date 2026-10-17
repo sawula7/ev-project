@@ -1,15 +1,12 @@
-import mongoose from 'mongoose';
+import { getDb, closeDb, type Db } from '@ev/db';
 import { config } from './index';
 import { logger } from './logger';
 
-export async function connectDatabase(): Promise<void> {
-  mongoose.connection.on('disconnected', () =>
-    logger.warn('MongoDB disconnected')
-  );
-  mongoose.connection.on('reconnected', () =>
-    logger.info('MongoDB reconnected')
-  );
-
-  await mongoose.connect(config.mongoUri);
-  logger.info('MongoDB connected');
+export function connectDatabase(): Db {
+  const db = getDb(config.databaseUrl);
+  logger.info('PostgreSQL connected via Drizzle');
+  return db;
 }
+
+export { closeDb };
+export type { Db };

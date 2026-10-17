@@ -12,7 +12,7 @@ export const config = {
   ocppPort: parseInt(process.env.OCPP_PORT ?? '9000', 10),
   nodeEnv: process.env.NODE_ENV ?? 'development',
 
-  mongoUri: required('MONGODB_URI'),
+  databaseUrl: required('DATABASE_URL'),
   redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6379',
 
   jwtSecret: required('JWT_SECRET'),

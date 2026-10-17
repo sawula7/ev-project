@@ -1,12 +1,16 @@
 version: '3.9'
 
 services:
-  mongo:
-    image: mongo:7
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ev_charging
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
     ports:
-      - '27017:27017'
+      - '5432:5432'
     volumes:
-      - mongo_data:/data/db
+      - postgres_data:/var/lib/postgresql/data
 
   redis:
     image: redis:7-alpine
@@ -23,11 +27,11 @@ services:
     env_file:
       - apps/backend/.env
     environment:
-      MONGODB_URI: mongodb://mongo:27017/ev_charging
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/ev_charging
       REDIS_URL: redis://redis:6379
     depends_on:
-      - mongo
+      - postgres
       - redis
 
 volumes:
-  mongo_data:
+  postgres_data:
