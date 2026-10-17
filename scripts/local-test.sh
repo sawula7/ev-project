@@ -73,8 +73,7 @@ fi
 # ── 4. Push Drizzle schema to Postgres ──────────────────────────────────────
 
 info "Pushing Drizzle schema to PostgreSQL…"
-DATABASE_URL="postgresql://postgres:postgres@localhost:5432/ev_charging_local" \
-  npx drizzle-kit push --config packages/db/drizzle.config.ts
+(cd packages/db && DATABASE_URL="postgresql://postgres:postgres@localhost:5432/ev_charging_local" npx drizzle-kit push)
 ok "Schema pushed"
 
 # ── 5. Run unit tests ────────────────────────────────────────────────────────

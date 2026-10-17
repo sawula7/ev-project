@@ -28,7 +28,11 @@ export async function handleStartTransaction(
     return { transactionId: 0, idTagInfo: { status: 'Invalid' } };
   }
 
-  const transactionId = Date.now(); // simple incrementing id via timestamp; good enough for single-charger
+  // OCPP 1.6's transactionId is a 32-bit integer on the wire — ocpp-rpc enforces
+  // this and rejects a millisecond Date.now() value as out of range. Seconds
+  // since epoch stays well within int32 until year 2038, and is still unique
+  // enough per charge point for single-charger pilot scale.
+  const transactionId = Math.floor(Date.now() / 1000);
 
   await db
     .update(chargingSessions)

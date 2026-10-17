@@ -89,8 +89,6 @@ async function run() {
   client.handle('RemoteStartTransaction', async ({ params }) => {
     log('← RemoteStartTransaction', params);
 
-    const txId = Date.now();
-    transactionId = txId;
     meterValueWh  = 0;
 
     // StatusNotification: Charging
@@ -99,7 +97,8 @@ async function run() {
       timestamp: new Date().toISOString(),
     });
 
-    // StartTransaction
+    // StartTransaction — the CSMS assigns the authoritative transactionId in
+    // its response; a real charger must echo that back, not invent its own.
     const startResp = await client.call('StartTransaction', {
       connectorId: 1,
       idTag:       params.idTag,
@@ -107,13 +106,14 @@ async function run() {
       timestamp:   new Date().toISOString(),
     });
     log('StartTransaction →', startResp);
+    transactionId = startResp.transactionId;
 
     // MeterValues every 10s (real charger does 60s; use 10s to see results faster locally)
     meterInterval = setInterval(async () => {
       meterValueWh += 1000; // simulate 6 kW charger: 1000 Wh per 10 min → scaled to 10s for testing
       const mv = await client.call('MeterValues', {
         connectorId: 1,
-        transactionId: txId,
+        transactionId: transactionId,
         meterValue: [makeMeterValue(meterValueWh)],
       });
       log(`MeterValues sent (${meterValueWh} Wh) →`, mv);
